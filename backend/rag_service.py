@@ -20,9 +20,28 @@ def get_embedding_fn():
     return _embedding_fn
 
 
+def get_client():
+    return chromadb.PersistentClient(path=CHROMA_PATH)
+
+
 def get_collection(name: str):
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    client = get_client()
     return client.get_or_create_collection(
+        name=name,
+        embedding_function=get_embedding_fn(),
+    )
+
+
+def reset_collection(name: str):
+    """删除并重建 collection，彻底清空旧数据。
+    比 collection.delete(ids=...) 更可靠，避免 ChromaDB 默认只返回前10条的坑。
+    """
+    client = get_client()
+    try:
+        client.delete_collection(name=name)
+    except Exception:
+        pass  # collection 不存在时忽略
+    return client.create_collection(
         name=name,
         embedding_function=get_embedding_fn(),
     )
@@ -31,11 +50,8 @@ def get_collection(name: str):
 # ── 存入表结构 ────────────────────────────────────────────
 def index_schema(schema: list[dict]):
     """把数据库字段结构向量化存入 ChromaDB"""
-    collection = get_collection("schema")
-
-    existing = collection.get()
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
+    # 直接删除重建，彻底清空，避免旧数据残留
+    collection = reset_collection("schema")
 
     documents, ids, metadatas = [], [], []
 
@@ -61,12 +77,8 @@ def index_knowledge(knowledge: list[dict]):
     把业务知识向量化存入 ChromaDB
     knowledge 格式：[{"type": "metric/term/relation", "text": "..."}]
     """
-    collection = get_collection("knowledge")
-
-    # 清空旧数据
-    existing = collection.get()
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
+    # 直接删除重建，彻底清空，避免旧数据残留
+    collection = reset_collection("knowledge")
 
     documents, ids, metadatas = [], [], []
 

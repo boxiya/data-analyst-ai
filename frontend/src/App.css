@@ -14,10 +14,11 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  max-width: 900px;
+  max-width: 960px;
   margin: 0 auto;
 }
 
+/* ── Header ── */
 .header {
   padding: 20px 24px;
   background: #fff;
@@ -25,6 +26,17 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.header h1 {
+  font-size: 20px;
+  color: #ff6900;
+}
+
+.header p {
+  font-size: 13px;
+  color: #999;
+  margin-top: 4px;
 }
 
 .clear-btn {
@@ -43,17 +55,7 @@ body {
   border-color: #ff6900;
 }
 
-.header h1 {
-  font-size: 20px;
-  color: #ff6900;
-}
-
-.header p {
-  font-size: 13px;
-  color: #999;
-  margin-top: 4px;
-}
-
+/* ── Chat Area ── */
 .chat-area {
   flex: 1;
   overflow-y: auto;
@@ -63,14 +65,43 @@ body {
   gap: 16px;
 }
 
+/* ── 空状态提示 ── */
 .empty-hint {
   text-align: center;
-  color: #bbb;
   margin-top: 80px;
-  line-height: 2;
-  font-size: 15px;
 }
 
+.hint-title {
+  color: #bbb;
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+.hint-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
+.hint-chips span {
+  padding: 8px 16px;
+  background: #fff;
+  border: 1px solid #eee;
+  border-radius: 20px;
+  font-size: 13px;
+  color: #666;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.hint-chips span:hover {
+  border-color: #ff6900;
+  color: #ff6900;
+  background: #fff8f5;
+}
+
+/* ── 消息气泡 ── */
 .message {
   display: flex;
 }
@@ -84,7 +115,7 @@ body {
 }
 
 .bubble {
-  max-width: 80%;
+  max-width: 85%;
   padding: 12px 16px;
   border-radius: 12px;
   font-size: 14px;
@@ -104,19 +135,133 @@ body {
   width: 100%;
 }
 
+/* ── 加载中 ── */
 .loading {
+  color: #999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.loading-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #ff6900;
+  border-radius: 50%;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+
+/* ── 模式标签（分析模式专用）── */
+.mode-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+/* ── 分析步骤 ── */
+.steps-wrap {
+  margin-bottom: 16px;
+}
+
+.steps-title {
+  font-size: 12px;
+  color: #999;
+  margin-bottom: 8px;
+}
+
+.step-card {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.step-card.step-error {
+  border-color: #fed7d7;
+}
+
+.step-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #fafafa;
+  cursor: pointer;
+  user-select: none;
+  flex-wrap: wrap;
+}
+
+.step-header:hover {
+  background: #f0f0f0;
+}
+
+.step-num {
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: #ff6900;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.step-card.step-error .step-num {
+  background: #e53e3e;
+}
+
+.step-question {
+  font-size: 13px;
+  font-weight: 600;
+  color: #333;
+  flex: 1;
+}
+
+.step-purpose {
+  font-size: 12px;
   color: #999;
 }
 
-.error {
-  color: #e53e3e;
+.step-toggle {
+  font-size: 11px;
+  color: #bbb;
 }
 
+.step-body {
+  padding: 12px 14px;
+  border-top: 1px solid #eee;
+}
+
+/* ── 结论区域 ── */
 .conclusion {
-  margin-bottom: 12px;
   white-space: pre-wrap;
+  line-height: 1.8;
 }
 
+.conclusion-analysis {
+  background: #fffbf5;
+  border: 1px solid #ffe0c0;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.conclusion-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ff6900;
+  margin-bottom: 8px;
+}
+
+/* ── 数据表格 ── */
 .table-wrap {
   overflow-x: auto;
   margin: 12px 0;
@@ -134,6 +279,7 @@ th {
   text-align: left;
   border-bottom: 2px solid #eee;
   color: #666;
+  white-space: nowrap;
 }
 
 td {
@@ -145,6 +291,7 @@ tr:last-child td {
   border-bottom: none;
 }
 
+/* ── SQL 折叠 ── */
 .sql-detail {
   margin-top: 12px;
   font-size: 12px;
@@ -152,8 +299,12 @@ tr:last-child td {
 
 .sql-detail summary {
   cursor: pointer;
-  color: #999;
+  color: #bbb;
   user-select: none;
+}
+
+.sql-detail summary:hover {
+  color: #999;
 }
 
 .sql-detail pre {
@@ -166,6 +317,13 @@ tr:last-child td {
   line-height: 1.6;
 }
 
+/* ── 错误 ── */
+.error {
+  color: #e53e3e;
+  font-size: 13px;
+}
+
+/* ── 输入区域 ── */
 .input-area {
   display: flex;
   gap: 10px;

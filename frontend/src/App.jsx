@@ -109,6 +109,13 @@ function AssistantBubble({ msg }) {
           <pre>{msg.sql}</pre>
         </details>
       )}
+
+      {/* v3：分析焦点摘要（系统记住了什么，方便用户理解追问上下文）*/}
+      {msg.context_summary && (
+        <div className="context-summary">
+          🧠 已记住：{msg.context_summary}
+        </div>
+      )}
     </div>
   )
 }
@@ -131,6 +138,9 @@ export default function App() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [loadingText, setLoadingText] = useState('思考中...')
+  // v3：存储上一轮的分析焦点摘要，每次请求时带给后端
+  // 后端用它精准理解追问上下文，不依赖 LLM 从长篇历史里猜
+  const [contextSummary, setContextSummary] = useState('')
   const bottomRef = useRef(null)
 
   useEffect(() => {
@@ -155,7 +165,8 @@ export default function App() {
       const res = await fetch(`${API}/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, history }),
+        // v3：带上上一轮的分析焦点摘要
+        body: JSON.stringify({ question, history, context_summary: contextSummary }),
       })
       const data = await res.json()
 
@@ -173,7 +184,13 @@ export default function App() {
         sql: data.sql,
         error: data.error,
         intent: data.intent,
+        context_summary: data.context_summary,  // 展示用
       }])
+
+      // v3：更新分析焦点摘要（下次追问时带给后端）
+      if (data.context_summary) {
+        setContextSummary(data.context_summary)
+      }
 
       // 更新对话历史（只存文字，供下次追问使用）
       const assistantContent = data.conclusion || data.error || '无结果'
@@ -205,6 +222,7 @@ export default function App() {
   const clearChat = () => {
     setMessages([])
     setHistory([])
+    setContextSummary('')  // v3：清空对话时同时清空摘要
   }
 
   return (

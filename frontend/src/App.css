@@ -317,6 +317,18 @@ tr:last-child td {
   line-height: 1.6;
 }
 
+/* ── 分析焦点摘要（v3）── */
+.context-summary {
+  margin-top: 10px;
+  padding: 6px 10px;
+  background: #f0f7ff;
+  border-left: 3px solid #90cdf4;
+  border-radius: 0 6px 6px 0;
+  font-size: 12px;
+  color: #4a90d9;
+  line-height: 1.5;
+}
+
 /* ── 错误 ── */
 .error {
   color: #e53e3e;

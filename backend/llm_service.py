@@ -1,5 +1,5 @@
 # ============================================================
-# llm_service.py —— LLM 调用模块（v3，通用上下文记忆）
+# llm_service.py —— LLM 调用模块（v4，多数据源）
 #
 # v2 升级内容：
 # 1. generate_sql：prompt 更严格，明确禁止翻译关键词，强化口径规则
@@ -10,6 +10,10 @@
 # v3 新增：
 # 5. summarize_context：每轮查询后提取"分析焦点摘要"，用自然语言描述
 #    本轮查询的核心条件，不依赖预定义字段，对任意数据库通用
+#
+# v4 新增（多数据源）：
+# 6. detect_sources：根据用户问题判断需要查哪些数据源（online/offline/both）
+#    返回 source_ids 列表，驱动 analysis_engine 路由到正确的库
 # ============================================================
 
 import os
@@ -384,3 +388,87 @@ def summarize_context(question: str, conclusion: str, sql: str) -> str:
     except Exception:
         # 摘要生成失败不影响主流程，返回原始问题作为兜底
         return question
+
+
+# ── 数据源识别（v4 新增，多数据源路由核心）────────────────
+def detect_sources(question: str, sources: list[dict], history_text: str = "") -> list[str]:
+    """
+    根据用户问题判断需要查哪些数据源，返回 source_id 列表。
+    
+    sources 格式（来自 sources.json）：
+    [
+        {"id": "online", "name": "线上业务库", "description": "...", "keywords": [...]},
+        {"id": "offline", "name": "线下门店库", "description": "...", "keywords": [...]},
+    ]
+    
+    返回示例：
+    - ["online"]          → 只查线上库
+    - ["offline"]         → 只查线下库
+    - ["online", "offline"] → 两个库都要查（跨库联合分析）
+    
+    【判断逻辑】
+    1. 先用关键词快速匹配（速度快，不消耗 token）
+    2. 关键词匹配不确定时，再用 LLM 判断（准确率高）
+    3. 完全不确定时，默认查所有数据源（宁可多查不漏查）
+    """
+    import json  # 移到函数顶部，避免在 f-string 里引用时 UnboundLocalError
+
+    # ── 第一步：关键词快速匹配 ────────────────────────────
+    matched = set()
+    q_lower = question.lower()
+    for source in sources:
+        for kw in source.get("keywords", []):
+            if kw in question or kw.lower() in q_lower:
+                matched.add(source["id"])
+                break
+
+    # 如果关键词匹配到了明确的单个数据源，直接返回（不用 LLM）
+    if len(matched) == 1:
+        return list(matched)
+
+    # ── 第二步：LLM 判断（关键词匹配不确定时）────────────
+    context = f"{history_text}\n\n" if history_text else ""
+
+    # 构建数据源描述
+    sources_desc = "\n".join([
+        f"- {s['id']}（{s['name']}）：{s['description']}，关键词：{', '.join(s.get('keywords', [])[:5])}"
+        for s in sources
+    ])
+    source_ids = [s["id"] for s in sources]
+
+    system_prompt = f"""你是一个数据路由器。根据用户问题，判断需要查询哪些数据源。
+
+可用数据源：
+{sources_desc}
+
+判断规则：
+1. 如果问题只涉及线上业务（APP/小程序/在线预订/用户/会员），只返回线上库
+2. 如果问题只涉及线下业务（门店/顾问/到店/柜台），只返回线下库
+3. 如果问题需要对比线上和线下，或者问题不明确，返回所有数据源
+4. 如果问题涉及"整体/全渠道/总体"，返回所有数据源
+
+只输出 JSON 数组，包含需要查询的 source_id，不要有任何解释：
+["online"]
+["offline"]
+{json.dumps(source_ids, ensure_ascii=False)}"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{context}用户问题：{question}"}
+    ]
+
+    try:
+        raw = chat(messages, temperature=0.1)
+        start = raw.find('[')
+        end = raw.rfind(']') + 1
+        if start >= 0 and end > start:
+            result = json.loads(raw[start:end])
+            # 过滤掉不存在的 source_id
+            valid = [r for r in result if r in source_ids]
+            if valid:
+                return valid
+    except Exception:
+        pass
+
+    # 兜底：返回所有数据源
+    return source_ids

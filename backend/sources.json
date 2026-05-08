@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "id": "online",
+      "name": "线上业务库",
+      "description": "美团旅行线上预订数据，包含用户、酒店、线上订单",
+      "database": "meituan_travel",
+      "tables": ["users", "hotels", "orders"],
+      "keywords": ["线上", "APP", "小程序", "网站", "在线", "预订", "用户", "注册", "会员", "等级", "积分"]
+    },
+    {
+      "id": "offline",
+      "name": "线下门店库",
+      "description": "美团旅行线下门店数据，包含门店信息和线下成交订单",
+      "database": "offline_db",
+      "tables": ["offline_stores", "offline_orders"],
+      "keywords": ["线下", "门店", "旗舰店", "合作点", "自助机", "顾问", "到店", "柜台", "kiosk"]
+    }
+  ]
+}

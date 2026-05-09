@@ -810,6 +810,28 @@ export default function App() {
       // 后端返回 401 说明 token 过期，自动退出登录
       if (res.status === 401) { handleLogout(); return }
 
+      // 非 200 说明接口不存在或后端出错，降级到普通 /ask 接口
+      if (!res.ok || !res.body) {
+        console.warn('[SSE] 流式接口不可用，降级到 /ask，状态码:', res.status)
+        const fallback = await fetch(`${API}/ask`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ question, history, context_summary: contextSummary }),
+        })
+        if (fallback.status === 401) { handleLogout(); return }
+        const data = await fallback.json()
+        if (data.detail) throw new Error(data.detail)
+        setMessages(prev => [...prev, {
+          role: 'assistant', mode: data.mode, analysis_type: data.analysis_type,
+          steps: data.steps, conclusion: data.conclusion, data: data.data,
+          sql: data.sql, error: data.error, intent: data.intent,
+          context_summary: data.context_summary, rag_sources: data.rag_sources, source_ids: data.source_ids,
+        }])
+        if (data.context_summary) setContextSummary(data.context_summary)
+        setHistory(prev => [...prev, { role: 'user', content: question }, { role: 'assistant', content: data.conclusion || '无结果' }])
+        setLoading(false); setStreamSteps([]); return
+      }
+
       // 获取可读流，用于逐块读取 SSE 数据
       const reader = res.body.getReader()
       const decoder = new TextDecoder('utf-8')
@@ -883,8 +905,9 @@ export default function App() {
           }
         }
       }
-    } catch {
-      setMessages(prev => [...prev, { role: 'assistant', error: '请求失败，请检查后端是否启动' }])
+    } catch (err) {
+      console.error('[sendQuestion] 错误:', err)
+      setMessages(prev => [...prev, { role: 'assistant', error: `请求失败：${err.message || '请检查后端是否启动'}` }])
     }
 
     setLoading(false)

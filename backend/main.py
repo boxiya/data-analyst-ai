@@ -239,7 +239,7 @@ def ask(req: AskRequest, current_user: dict = Depends(get_current_user)):
       }
     """
     history_text = _build_history_text(req)
-    result, _ = process_question_with_trace(req.question, history_text)
+    result, trace_events = process_question_with_trace(req.question, history_text)
     result = _enrich_result(req.question, result)
     write_log(
         username=current_user["username"],
@@ -247,6 +247,14 @@ def ask(req: AskRequest, current_user: dict = Depends(get_current_user)):
         question=req.question,
         mode=result.get("mode", "simple"),
         source_ids=result.get("source_ids", []),
+    )
+    # 把完整链路数据写入内存缓存，供 /trace/last 接口读取
+    _last_trace[current_user["username"]] = _build_trace(
+        username=current_user["username"],
+        role=current_user["role"],
+        question=req.question,
+        result=result,
+        trace_events=trace_events,
     )
     return result
 
@@ -283,6 +291,7 @@ async def ask_stream(req: AskRequest, request: Request):
     async def event_generator():
         loop = asyncio.get_event_loop()
         trace_queue = asyncio.Queue()
+        collected_steps = []  # 收集所有步骤事件，用于写入 _last_trace
 
         def on_trace(event: dict):
             """
@@ -304,6 +313,7 @@ async def ask_stream(req: AskRequest, request: Request):
         while not future.done():
             try:
                 event = await asyncio.wait_for(trace_queue.get(), timeout=0.1)
+                collected_steps.append(event)  # 同时收集，用于 trace
                 yield _sse(event)
             except asyncio.TimeoutError:
                 continue  # 没有新事件，继续等待
@@ -311,6 +321,7 @@ async def ask_stream(req: AskRequest, request: Request):
         # 取出队列里剩余的事件（分析完成后可能还有未推送的）
         while not trace_queue.empty():
             event = trace_queue.get_nowait()
+            collected_steps.append(event)
             yield _sse(event)
 
         # 获取最终结果
@@ -327,6 +338,15 @@ async def ask_stream(req: AskRequest, request: Request):
             question=req.question,
             mode=result.get("mode", "simple"),
             source_ids=result.get("source_ids", []),
+        )
+        # 把完整链路数据写入内存缓存，供 /trace/last 接口读取
+        # collected_steps 是 SSE 推送过程中收集的所有步骤事件
+        _last_trace[current_user["username"]] = _build_trace(
+            username=current_user["username"],
+            role=current_user["role"],
+            question=req.question,
+            result=result,
+            trace_events=collected_steps,
         )
         # 最后推送完整结果，前端收到 type="result" 后渲染图表和结论
         yield _sse({"type": "result", "data": result, "status": "done"})
@@ -438,3 +458,113 @@ def _sse(data: dict) -> str:
     前端用 EventSource 或 fetch + ReadableStream 接收。
     """
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+# ── 全局 trace 缓存（内存，重启清空）────────────────────────
+# 每次有用户提问，就把这次请求的完整链路数据写到这里。
+# 前端可以通过 GET /trace/last 随时拉取，展示"上一次请求发生了什么"。
+#
+# 为什么用内存缓存而不是数据库？
+#   这是调试/可观测性功能，不需要持久化，重启后重置即可。
+#   如果要持久化，可以改成写 jsonl 文件（和 operation_logs.jsonl 一样）。
+_last_trace: dict = {}
+
+
+def _build_trace(username: str, role: str, question: str, result: dict, trace_events: list) -> dict:
+    """
+    把一次完整请求的所有关键数据打包成 trace 对象。
+
+    包含以下几层：
+      1. 身份层   → 谁在请求、用的什么 token（角色）
+      2. 意图层   → AI 识别出的问题类型、选了哪些数据源
+      3. RAG层    → 检索到了哪些表字段和业务规则
+      4. SQL层    → 生成了什么 SQL、执行结果有多少行
+      5. 结论层   → AI 生成的分析结论
+      6. 日志层   → 写入 operation_logs.jsonl 的那条记录
+      7. 执行步骤 → SSE 推送的每一步进度事件
+    """
+    from datetime import datetime
+
+    # 提取 SQL 信息（简单查询 vs 分析型查询结构不同）
+    sql_info = []
+    if result.get("mode") == "simple":
+        sql_info.append({
+            "source_id": (result.get("source_ids") or ["?"])[0],
+            "sql": result.get("sql", ""),
+            "row_count": len(result.get("data") or []),
+            "error": None,
+        })
+    elif result.get("mode") == "analysis":
+        for step in (result.get("steps") or []):
+            sql_info.append({
+                "step": step.get("step"),
+                "sub_question": step.get("sub_question"),
+                "source_id": step.get("source_id"),
+                "sql": step.get("sql", ""),
+                "row_count": len(step.get("data") or []),
+                "error": step.get("error"),
+            })
+
+    return {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        # ① 身份层
+        "identity": {
+            "username": username,
+            "role": role,
+            "token_info": f"JWT HS256，角色={role}，8小时有效",
+        },
+        # ② 意图层
+        "intent": {
+            "question": question,
+            "detected": result.get("intent", {}),
+            "source_ids": result.get("source_ids", []),
+            "mode": result.get("mode", "simple"),
+            "analysis_type": result.get("analysis_type"),
+        },
+        # ③ RAG层
+        "rag": {
+            "knowledge_hits": result.get("rag_sources", []),
+            "knowledge_count": len(result.get("rag_sources") or []),
+            "stored_in": "backend/vector_store/（ChromaDB，本地文件）",
+        },
+        # ④ SQL层
+        "sql": sql_info,
+        # ⑤ 结论层
+        "conclusion": {
+            "text": result.get("conclusion", ""),
+            "context_summary": result.get("context_summary", ""),
+        },
+        # ⑥ 日志层
+        "log_record": {
+            "file": "backend/operation_logs.jsonl",
+            "written": {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "username": username,
+                "role": role,
+                "question": question,
+                "mode": result.get("mode", "simple"),
+                "source_ids": result.get("source_ids", []),
+            },
+        },
+        # ⑦ 执行步骤（SSE 推送的每一步）
+        "steps": trace_events,
+    }
+
+
+# ── 接口 8：全链路追踪（登录用户均可查看自己的上一次请求）──
+@app.get("/trace/last")
+def get_last_trace(current_user: dict = Depends(get_current_user)):
+    """
+    返回当前用户最近一次请求的完整链路数据。
+
+    包含：身份验证 → 数据源识别 → RAG检索 → SQL生成 → SQL执行 → 结论生成 → 日志写入
+    每一层都说明"产生了什么数据、存在哪里"。
+
+    前端用这个接口驱动 TracePanel 组件，让用户看到完整的请求链路。
+    """
+    username = current_user["username"]
+    # 只返回当前用户自己的 trace（隐私隔离）
+    trace = _last_trace.get(username)
+    if not trace:
+        return {"trace": None, "message": "还没有查询记录，先提一个问题吧"}
+    return {"trace": trace}

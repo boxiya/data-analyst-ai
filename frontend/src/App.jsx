@@ -417,6 +417,215 @@ function AssistantBubble({ msg }) {
   )
 }
 
+// ── 全链路追踪面板 ★新增 ──────────────────────────────────
+//
+// 【这个组件是干什么的？】
+// 用户提问后，后端会把这次请求产生的所有数据打包存起来。
+// 点击"查看链路"按钮，这个面板就会拉取 /trace/last 接口，
+// 展示从登录到拿到结论的每一步：
+//
+//   ① 身份层  → 你是谁、用的什么 token、角色是什么
+//   ② 意图层  → AI 识别出你在问什么类型的问题、选了哪些数据库
+//   ③ RAG层   → 向量库检索到了哪些业务规则（存在 vector_store/）
+//   ④ SQL层   → 生成了什么 SQL、执行返回了多少行数据
+//   ⑤ 结论层  → AI 生成的分析结论和上下文摘要
+//   ⑥ 日志层  → 写入 operation_logs.jsonl 的那条记录长什么样
+//   ⑦ 执行步骤→ SSE 推送的每一步进度事件
+//
+// 每一层都用不同颜色的卡片区分，点击可以展开/收起详情。
+function TracePanel({ token, onClose }) {
+  const [trace, setTrace] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [openSections, setOpenSections] = useState({ identity: true, intent: true, rag: false, sql: false, conclusion: false, log: false, steps: false })
+
+  useEffect(() => {
+    fetch(`${API}/trace/last`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.trace) setTrace(data.trace)
+        else setError(data.message || '暂无追踪数据')
+        setLoading(false)
+      })
+      .catch(() => { setError('网络错误'); setLoading(false) })
+  }, [])
+
+  const toggle = (key) => setOpenSections(prev => ({ ...prev, [key]: !prev[key] }))
+
+  // 每个"层"的配置：标题、颜色、图标
+  const sections = [
+    {
+      key: 'identity',
+      icon: '🔐',
+      title: '① 身份层',
+      subtitle: '谁在请求、用的什么 token',
+      color: '#805ad5',
+      render: (t) => (
+        <div className="trace-kv">
+          <div><span className="trace-k">用户名</span><span className="trace-v">{t.identity.username}</span></div>
+          <div><span className="trace-k">角色</span><span className="trace-v">{t.identity.role}</span></div>
+          <div><span className="trace-k">Token</span><span className="trace-v trace-mono">{t.identity.token_info}</span></div>
+          <div><span className="trace-k">存储位置</span><span className="trace-v">浏览器 localStorage["da_token"]</span></div>
+        </div>
+      )
+    },
+    {
+      key: 'intent',
+      icon: '🧠',
+      title: '② 意图层',
+      subtitle: 'AI 识别问题类型 + 选数据源',
+      color: '#3182ce',
+      render: (t) => (
+        <div className="trace-kv">
+          <div><span className="trace-k">问题</span><span className="trace-v">{t.intent.question}</span></div>
+          <div><span className="trace-k">查询模式</span><span className="trace-v">{t.intent.mode === 'analysis' ? `分析型（${t.intent.analysis_type}）` : '简单查询'}</span></div>
+          <div><span className="trace-k">数据源</span><span className="trace-v">{(t.intent.source_ids || []).join('、') || '无'}</span></div>
+          {t.intent.detected?.reason && (
+            <div><span className="trace-k">判断理由</span><span className="trace-v">{t.intent.detected.reason}</span></div>
+          )}
+          <div><span className="trace-k">存储位置</span><span className="trace-v">内存（不持久化）</span></div>
+        </div>
+      )
+    },
+    {
+      key: 'rag',
+      icon: '🔍',
+      title: '③ RAG层',
+      subtitle: '向量检索命中的业务规则',
+      color: '#38a169',
+      render: (t) => (
+        <div className="trace-kv">
+          <div><span className="trace-k">命中条数</span><span className="trace-v">{t.rag.knowledge_count} 条</span></div>
+          <div><span className="trace-k">存储位置</span><span className="trace-v trace-mono">{t.rag.stored_in}</span></div>
+          {(t.rag.knowledge_hits || []).map((h, i) => (
+            <div key={i}><span className="trace-k">规则{i + 1}</span><span className="trace-v">[{h.type}] {h.text}</span></div>
+          ))}
+          {t.rag.knowledge_count === 0 && <div><span className="trace-v" style={{color:'#aaa'}}>本次未命中业务规则</span></div>}
+        </div>
+      )
+    },
+    {
+      key: 'sql',
+      icon: '🗄️',
+      title: '④ SQL层',
+      subtitle: '生成的 SQL + 执行结果行数',
+      color: '#e53e3e',
+      render: (t) => (
+        <div>
+          {(t.sql || []).map((s, i) => (
+            <div key={i} className="trace-sql-block">
+              {s.step && <div className="trace-sql-step">第 {s.step} 步：{s.sub_question}</div>}
+              <div className="trace-kv">
+                <div><span className="trace-k">数据源</span><span className="trace-v">{s.source_id}</span></div>
+                <div><span className="trace-k">返回行数</span><span className="trace-v">{s.row_count} 行</span></div>
+                {s.error && <div><span className="trace-k">错误</span><span className="trace-v" style={{color:'#e53e3e'}}>{s.error}</span></div>}
+              </div>
+              {s.sql && <pre className="trace-sql-pre">{s.sql}</pre>}
+            </div>
+          ))}
+          <div className="trace-kv" style={{marginTop:8}}>
+            <div><span className="trace-k">执行位置</span><span className="trace-v">MySQL（db_service.py → execute_sql）</span></div>
+          </div>
+        </div>
+      )
+    },
+    {
+      key: 'conclusion',
+      icon: '📊',
+      title: '⑤ 结论层',
+      subtitle: 'AI 生成的分析结论',
+      color: '#d69e2e',
+      render: (t) => (
+        <div className="trace-kv">
+          <div><span className="trace-k">结论</span><span className="trace-v">{t.conclusion.text || '（无）'}</span></div>
+          <div><span className="trace-k">上下文摘要</span><span className="trace-v">{t.conclusion.context_summary || '（无）'}</span></div>
+          <div><span className="trace-k">生成方式</span><span className="trace-v">DeepSeek API（llm_service.py → generate_conclusion）</span></div>
+        </div>
+      )
+    },
+    {
+      key: 'log',
+      icon: '📋',
+      title: '⑥ 日志层',
+      subtitle: '写入 operation_logs.jsonl 的记录',
+      color: '#718096',
+      render: (t) => (
+        <div className="trace-kv">
+          <div><span className="trace-k">文件路径</span><span className="trace-v trace-mono">{t.log_record.file}</span></div>
+          <div><span className="trace-k">写入格式</span><span className="trace-v">jsonl（每行一条 JSON）</span></div>
+          <div><span className="trace-k">写入内容</span></div>
+          <pre className="trace-sql-pre">{JSON.stringify(t.log_record.written, null, 2)}</pre>
+          <div><span className="trace-k">谁能查看</span><span className="trace-v">仅 admin 角色（/logs 接口）</span></div>
+        </div>
+      )
+    },
+    {
+      key: 'steps',
+      icon: '⚙️',
+      title: '⑦ 执行步骤',
+      subtitle: 'SSE 推送的每一步进度事件',
+      color: '#00b5d8',
+      render: (t) => (
+        <div>
+          {(t.steps || []).map((s, i) => (
+            <div key={i} className="trace-step-row">
+              <span className={`trace-step-status trace-step-${s.status}`}>
+                {s.status === 'done' ? '✅' : s.status === 'error' ? '❌' : '⏳'}
+              </span>
+              <span className="trace-step-label">{s.label}</span>
+              {s.detail && <span className="trace-step-detail">{s.detail}</span>}
+            </div>
+          ))}
+          {(!t.steps || t.steps.length === 0) && <span style={{color:'#aaa',fontSize:13}}>无步骤记录</span>}
+        </div>
+      )
+    },
+  ]
+
+  return (
+    <div className="trace-overlay" onClick={onClose}>
+      <div className="trace-panel" onClick={e => e.stopPropagation()}>
+        <div className="trace-header">
+          <div>
+            <h3>🔗 全链路追踪</h3>
+            <p className="trace-header-sub">上一次请求从登录到结论，每一步产生了什么、存在哪里</p>
+          </div>
+          <button className="log-close-btn" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="trace-body">
+          {loading && <p className="log-loading">加载中...</p>}
+          {error && <p className="log-error">{error}</p>}
+          {trace && (
+            <>
+              <div className="trace-time">请求时间：{trace.time}</div>
+              {sections.map(sec => (
+                <div key={sec.key} className="trace-section" style={{ borderLeftColor: sec.color }}>
+                  <div className="trace-section-header" onClick={() => toggle(sec.key)}>
+                    <span className="trace-section-icon">{sec.icon}</span>
+                    <div>
+                      <span className="trace-section-title" style={{ color: sec.color }}>{sec.title}</span>
+                      <span className="trace-section-sub">{sec.subtitle}</span>
+                    </div>
+                    <span className="trace-toggle">{openSections[sec.key] ? '▲' : '▼'}</span>
+                  </div>
+                  {openSections[sec.key] && (
+                    <div className="trace-section-body">
+                      {sec.render(trace)}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── 加载气泡（SSE版：显示实时进度步骤）────────────────────
 //
 // 【和旧版的区别】
@@ -517,6 +726,7 @@ export default function App() {
   const [loading, setLoading] = useState(false)     // 是否正在等待后端响应
   const [contextSummary, setContextSummary] = useState('') // 上一轮分析摘要
   const [showLogs, setShowLogs] = useState(false)   // 是否显示操作日志弹窗
+  const [showTrace, setShowTrace] = useState(false) // 是否显示全链路追踪面板
 
   // ── SSE 流式进度状态 ★新增 ──────────────────────────────
   // streamSteps：当前正在接收的进度步骤列表，loading 期间显示在 LoadingBubble 里
@@ -706,6 +916,9 @@ export default function App() {
           {currentRole === 'admin' && (
             <button className="log-btn" onClick={() => setShowLogs(true)}>📋 操作日志</button>
           )}
+          {messages.some(m => m.role === 'assistant' && !m.error) && (
+            <button className="trace-btn" onClick={() => setShowTrace(true)}>🔗 查看链路</button>
+          )}
           {messages.length > 0 && (
             <button className="clear-btn" onClick={clearChat}>清空对话</button>
           )}
@@ -752,6 +965,7 @@ export default function App() {
       </div>
 
       {showLogs && <LogModal token={token} onClose={() => setShowLogs(false)} />}
+      {showTrace && <TracePanel token={token} onClose={() => setShowTrace(false)} />}
 
       <div className="input-area">
         <textarea

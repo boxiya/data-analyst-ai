@@ -472,3 +472,56 @@ def detect_sources(question: str, sources: list[dict], history_text: str = "") -
 
     # 兜底：返回所有数据源
     return source_ids
+
+
+# ── SQL 自动修正（analysis_engine 重试机制的核心）────────
+def fix_sql(original_sql: str, error_message: str, question: str, context: str) -> str:
+    """
+    当 SQL 执行失败时，把错误信息反馈给 DeepSeek，让它修正 SQL。
+
+    【为什么需要这个函数？】
+    AI 生成的 SQL 偶尔会有以下问题：
+    - 字段名写错（如 order_count 实际是 order_id）
+    - 表名写错（如 order 实际是 orders）
+    - 语法错误（如 GROUP BY 后面少了字段）
+    - 业务口径错误（如忘记加 WHERE status='completed'）
+
+    与其直接报错让用户重新问，不如把错误信息告诉 AI，
+    让它自己修正，用户完全感知不到这个过程（静默重试）。
+
+    参数：
+      original_sql   → 执行失败的原始 SQL
+      error_message  → MySQL 返回的错误信息
+      question       → 用户的原始问题（帮助 AI 理解意图）
+      context        → RAG 检索到的表结构和业务规则（帮助 AI 修正字段名）
+
+    返回：
+      修正后的 SQL（纯 SQL，不含解释）
+    """
+    system_prompt = """你是一个 MySQL 专家，负责修正有错误的 SQL 语句。
+
+【修正规则】
+1. 只输出修正后的纯 SQL，不要有任何解释，不要用 markdown 代码块包裹
+2. 根据错误信息和表结构，找出并修正错误
+3. 常见错误类型：
+   - Unknown column：字段名写错，对照表结构修正
+   - Table doesn't exist：表名写错，对照表结构修正
+   - Syntax error：语法错误，修正 SQL 语法
+   - Ambiguous column：字段名有歧义，加上表名前缀（如 orders.city）
+4. 修正后的 SQL 必须符合原始问题的查询意图
+5. 保持原有的 WHERE/GROUP BY/ORDER BY/LIMIT 逻辑，只修正错误部分"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"用户问题：{question}\n\n"
+                f"表结构参考：\n{context[:1000]}\n\n"
+                f"执行失败的 SQL：\n{original_sql}\n\n"
+                f"MySQL 错误信息：{error_message}\n\n"
+                f"请输出修正后的 SQL："
+            )
+        }
+    ]
+    return chat(messages, temperature=0.1)

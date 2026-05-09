@@ -1,3 +1,33 @@
+// ============================================================
+// App.jsx —— 前端主文件（React + Vite）
+//
+// 这个文件包含整个前端的所有组件和逻辑，从上到下依次是：
+//
+//   常量定义
+//   ├─ LogModal        操作日志弹窗（admin专属）
+//   ├─ SmartChart      智能图表（自动选柱/折/饼图）
+//   ├─ DataTable       数据表格
+//   ├─ RagSources      RAG溯源标签
+//   ├─ SourceBadges    数据源标签（⚡线上库 ⚡线下库）
+//   ├─ AssistantBubble AI回复气泡（组合上面几个组件）
+//   ├─ LoadingBubble   加载中动画
+//   ├─ LoginPage       登录页
+//   └─ App             主应用（状态管理 + 发请求 + 布局）
+//
+// 数据流向：
+//   用户输入 → App.sendQuestion() → POST /ask → 后端
+//   后端返回 → setMessages() → AssistantBubble 渲染
+//
+// 状态说明（App组件里的 useState）：
+//   token        → JWT token，从 localStorage 读取，登录后写入
+//   currentUser  → 当前用户名
+//   currentRole  → 当前角色（admin/analyst/viewer），控制UI显示
+//   messages     → 所有对话记录，每条是 {role, content/conclusion/data/...}
+//   history      → 发给后端的对话历史（只含 role+content 的精简版）
+//   contextSummary → 上一轮分析摘要，下次提问时带上
+//   showLogs     → 是否显示操作日志弹窗
+// ============================================================
+
 import { useState, useRef, useEffect } from 'react'
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -5,9 +35,11 @@ import {
 } from 'recharts'
 import './App.css'
 
+// 后端地址，开发环境用 127.0.0.1:8000
 const API = 'http://127.0.0.1:8000'
 
-// 分析类型标签
+// 分析类型 → 中文标签 + 颜色（显示在回复气泡左上角）
+// 由后端 detect_intent() 识别后返回，前端根据这个显示对应标签
 const ANALYSIS_LABELS = {
   anomaly:      { label: '异动归因', color: '#e53e3e' },
   trend:        { label: '趋势分析', color: '#3182ce' },
@@ -15,7 +47,7 @@ const ANALYSIS_LABELS = {
   distribution: { label: '分布分析', color: '#38a169' },
 }
 
-// 图表颜色池
+// 图表颜色池，多条数据时依次取色
 const CHART_COLORS = ['#ff6900', '#3182ce', '#38a169', '#805ad5', '#e53e3e', '#d69e2e', '#00b5d8']
 
 // ── 操作日志弹窗（仅 admin 可见）────────────────────────────
@@ -410,23 +442,30 @@ function LoginPage({ onLogin }) {
 
 // ── 主应用 ────────────────────────────────────────────────
 export default function App() {
+  // ── 登录状态（从 localStorage 初始化，刷新页面不丢失）──
+  // () => ... 是惰性初始化，只在组件第一次渲染时执行一次
   const [token, setToken] = useState(() => localStorage.getItem('da_token') || '')
   const [currentUser, setCurrentUser] = useState(() => localStorage.getItem('da_user') || '')
   const [currentRole, setCurrentRole] = useState(() => localStorage.getItem('da_role') || '')
 
-  const [messages, setMessages] = useState([])
-  const [history, setHistory] = useState([])
-  const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [loadingText, setLoadingText] = useState('思考中...')
-  const [contextSummary, setContextSummary] = useState('')
-  const [showLogs, setShowLogs] = useState(false)
-  const bottomRef = useRef(null)
+  // ── 对话状态（内存中，刷新页面会清空）──────────────────
+  const [messages, setMessages] = useState([])      // 页面上显示的所有消息
+  const [history, setHistory] = useState([])        // 发给后端的对话历史（精简版）
+  const [input, setInput] = useState('')            // 输入框内容
+  const [loading, setLoading] = useState(false)     // 是否正在等待后端响应
+  const [loadingText, setLoadingText] = useState('思考中...') // 加载动画文字
+  const [contextSummary, setContextSummary] = useState('') // 上一轮分析摘要
+  const [showLogs, setShowLogs] = useState(false)   // 是否显示操作日志弹窗
 
+  // 用于自动滚动到最新消息
+  const bottomRef = useRef(null)
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
 
+  // ── 登录成功回调 ──────────────────────────────────────
+  // LoginPage 组件登录成功后调用这个函数，传入 token/username/role
+  // 同时写入 localStorage，下次刷新页面不需要重新登录
   const handleLogin = (t, u, r) => {
     setToken(t); setCurrentUser(u); setCurrentRole(r)
     localStorage.setItem('da_token', t)
@@ -434,6 +473,9 @@ export default function App() {
     localStorage.setItem('da_role', r)
   }
 
+  // ── 退出登录 ──────────────────────────────────────────
+  // 清空所有状态和 localStorage，回到登录页
+  // token 过期时（后端返回 401）也会自动调用这个函数
   const handleLogout = () => {
     setToken(''); setCurrentUser(''); setCurrentRole('')
     localStorage.removeItem('da_token')
@@ -442,17 +484,25 @@ export default function App() {
     setMessages([]); setHistory([]); setContextSummary('')
   }
 
-  // 未登录 → 显示登录页
+  // token 为空 → 显示登录页（React 条件渲染）
   if (!token) return <LoginPage onLogin={handleLogin} />
 
+  // ── 发送问题（核心函数）──────────────────────────────
+  // 流程：
+  //   1. 把用户消息加入 messages（立即显示在页面上）
+  //   2. 发 POST /ask 请求，带上 token + 历史对话
+  //   3. 收到响应后，把 AI 回复加入 messages
+  //   4. 更新 contextSummary 和 history，供下次对话使用
   const sendQuestion = async () => {
     if (!input.trim() || loading) return
     const question = input.trim()
     setInput('')
     setLoading(true)
     setLoadingText('理解问题中...')
+    // 立即把用户消息显示出来，不等后端响应
     setMessages(prev => [...prev, { role: 'user', content: question }])
 
+    // 模拟进度文字（后端处理需要几秒，给用户一些反馈）
     const t1 = setTimeout(() => setLoadingText('查询数据中...'), 2000)
     const t2 = setTimeout(() => setLoadingText('生成分析结论...'), 5000)
 
@@ -461,30 +511,33 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${token}`, // 每次请求都带上 token
         },
+        // history: 最近几轮对话，让 AI 理解上下文（支持追问）
+        // context_summary: 上一轮的分析摘要，比完整 history 更省 token
         body: JSON.stringify({ question, history, context_summary: contextSummary }),
       })
 
-      // token 过期
+      // 后端返回 401 说明 token 过期，自动退出登录
       if (res.status === 401) { handleLogout(); return }
 
       const data = await res.json()
       clearTimeout(t1); clearTimeout(t2)
 
+      // 把后端返回的所有字段存入 messages，AssistantBubble 组件负责渲染
       setMessages(prev => [...prev, {
         role: 'assistant',
-        mode: data.mode,
-        analysis_type: data.analysis_type,
-        steps: data.steps,
-        conclusion: data.conclusion,
-        data: data.data,
-        sql: data.sql,
-        error: data.error,
-        intent: data.intent,
-        context_summary: data.context_summary,
-        rag_sources: data.rag_sources,   // RAG 溯源
-        source_ids: data.source_ids,     // 数据源标签
+        mode: data.mode,                    // "simple" 或 "analysis"
+        analysis_type: data.analysis_type,  // "anomaly"/"trend"/"comparison"/"distribution"
+        steps: data.steps,                  // 分析型查询的子步骤
+        conclusion: data.conclusion,        // AI 生成的结论文字
+        data: data.data,                    // SQL 查询结果，SmartChart 用来画图
+        sql: data.sql,                      // 生成的 SQL（简单查询时有）
+        error: data.error,                  // 错误信息（如果有）
+        intent: data.intent,                // 意图识别结果
+        context_summary: data.context_summary, // 本轮摘要
+        rag_sources: data.rag_sources,      // RAG 溯源标签
+        source_ids: data.source_ids,        // 用了哪些数据源
       }])
 
       if (data.context_summary) setContextSummary(data.context_summary)

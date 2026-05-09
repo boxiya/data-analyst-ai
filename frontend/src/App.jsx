@@ -9,23 +9,28 @@
 //   ├─ DataTable       数据表格
 //   ├─ RagSources      RAG溯源标签
 //   ├─ SourceBadges    数据源标签（⚡线上库 ⚡线下库）
+//   ├─ StreamSteps     SSE流式进度面板（实时展示每步执行状态）★新增
 //   ├─ AssistantBubble AI回复气泡（组合上面几个组件）
 //   ├─ LoadingBubble   加载中动画
 //   ├─ LoginPage       登录页
 //   └─ App             主应用（状态管理 + 发请求 + 布局）
 //
-// 数据流向：
-//   用户输入 → App.sendQuestion() → POST /ask → 后端
-//   后端返回 → setMessages() → AssistantBubble 渲染
+// 数据流向（SSE版）：
+//   用户输入 → App.sendQuestion()
+//     → POST /ask/stream（SSE）
+//     → 后端每完成一步推送一个事件
+//     → StreamSteps 实时渲染进度
+//     → 收到 type="result" 事件 → AssistantBubble 渲染最终结果
 //
 // 状态说明（App组件里的 useState）：
-//   token        → JWT token，从 localStorage 读取，登录后写入
-//   currentUser  → 当前用户名
-//   currentRole  → 当前角色（admin/analyst/viewer），控制UI显示
-//   messages     → 所有对话记录，每条是 {role, content/conclusion/data/...}
-//   history      → 发给后端的对话历史（只含 role+content 的精简版）
+//   token          → JWT token，从 localStorage 读取，登录后写入
+//   currentUser    → 当前用户名
+//   currentRole    → 当前角色（admin/analyst/viewer），控制UI显示
+//   messages       → 所有对话记录，每条是 {role, content/conclusion/data/...}
+//   history        → 发给后端的对话历史（只含 role+content 的精简版）
 //   contextSummary → 上一轮分析摘要，下次提问时带上
-//   showLogs     → 是否显示操作日志弹窗
+//   showLogs       → 是否显示操作日志弹窗
+//   streamSteps    → 当前正在流式接收的进度步骤列表（loading时显示）
 // ============================================================
 
 import { useState, useRef, useEffect } from 'react'
@@ -268,6 +273,52 @@ function SourceBadges({ sourceIds }) {
   )
 }
 
+// ── SSE 流式进度面板 ★新增 ────────────────────────────────
+//
+// 【为什么要有这个组件？】
+// 后端 /ask/stream 接口每完成一步就推送一个事件，格式如下：
+//   {"type":"step","label":"识别数据源","detail":"线上库","status":"done"}
+//   {"type":"step","label":"生成SQL","detail":"SELECT...","status":"running"}
+//   {"type":"result","data":{...},"status":"done"}
+//
+// 这个组件负责把这些事件渲染成可视化的进度列表，
+// 让用户实时看到"现在后端在干什么"，而不是傻等一个转圈圈。
+//
+// 每个步骤有三种状态：
+//   running → 显示旋转动画 ⏳，表示正在执行
+//   done    → 显示绿色对勾 ✅，表示完成
+//   error   → 显示红色叉号 ❌，表示出错
+//
+// props:
+//   steps → 步骤数组，每项是 {label, detail, status}
+function StreamSteps({ steps }) {
+  if (!steps || steps.length === 0) return null
+
+  // 状态 → 图标映射
+  const statusIcon = {
+    running: <span className="step-icon step-running">⏳</span>,
+    done:    <span className="step-icon step-done">✅</span>,
+    error:   <span className="step-icon step-error-icon">❌</span>,
+  }
+
+  return (
+    <div className="stream-steps">
+      <p className="stream-steps-title">⚙️ 执行过程</p>
+      {steps.map((step, i) => (
+        <div key={i} className={`stream-step stream-step-${step.status}`}>
+          {statusIcon[step.status] || statusIcon.running}
+          <div className="stream-step-content">
+            <span className="stream-step-label">{step.label}</span>
+            {step.detail && (
+              <span className="stream-step-detail">{step.detail}</span>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── 分析步骤卡片 ──────────────────────────────────────────
 function AnalysisStep({ step }) {
   const [open, setOpen] = useState(false)
@@ -366,13 +417,24 @@ function AssistantBubble({ msg }) {
   )
 }
 
-// ── 加载气泡 ──────────────────────────────────────────────
-function LoadingBubble({ loadingText }) {
+// ── 加载气泡（SSE版：显示实时进度步骤）────────────────────
+//
+// 【和旧版的区别】
+// 旧版：只显示一行文字"查询数据中..."，用户看不到任何进度
+// 新版：实时展示 StreamSteps 进度面板，每完成一步立刻更新
+//
+// streamSteps 由 App.sendQuestion() 通过 SSE 事件实时更新，
+// 每收到一个 type="step" 事件就追加/更新一条步骤记录。
+function LoadingBubble({ streamSteps }) {
   return (
     <div className="message assistant">
       <div className="bubble assistant-bubble loading">
-        <span className="loading-dot" />
-        {loadingText}
+        {streamSteps && streamSteps.length > 0
+          // 有进度步骤时：显示实时进度面板
+          ? <StreamSteps steps={streamSteps} />
+          // 还没收到第一个步骤时：显示初始等待动画
+          : <><span className="loading-dot" /> 连接中...</>
+        }
       </div>
     </div>
   )
@@ -453,15 +515,22 @@ export default function App() {
   const [history, setHistory] = useState([])        // 发给后端的对话历史（精简版）
   const [input, setInput] = useState('')            // 输入框内容
   const [loading, setLoading] = useState(false)     // 是否正在等待后端响应
-  const [loadingText, setLoadingText] = useState('思考中...') // 加载动画文字
   const [contextSummary, setContextSummary] = useState('') // 上一轮分析摘要
   const [showLogs, setShowLogs] = useState(false)   // 是否显示操作日志弹窗
+
+  // ── SSE 流式进度状态 ★新增 ──────────────────────────────
+  // streamSteps：当前正在接收的进度步骤列表，loading 期间显示在 LoadingBubble 里
+  // 格式：[{label:"识别数据源", detail:"线上库", status:"done"}, ...]
+  // 每收到一个 SSE step 事件就更新这个列表，收到 result 事件后清空
+  const [streamSteps, setStreamSteps] = useState([])
+  // loadingText：进度面板底部的当前步骤文字（"识别数据源：线上库"）
+  const [loadingText, setLoadingText] = useState('连接中...')
 
   // 用于自动滚动到最新消息
   const bottomRef = useRef(null)
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, loading])
+  }, [messages, loading, streamSteps])
 
   // ── 登录成功回调 ──────────────────────────────────────
   // LoginPage 组件登录成功后调用这个函数，传入 token/username/role
@@ -482,77 +551,134 @@ export default function App() {
     localStorage.removeItem('da_user')
     localStorage.removeItem('da_role')
     setMessages([]); setHistory([]); setContextSummary('')
+    setStreamSteps([])
   }
 
   // token 为空 → 显示登录页（React 条件渲染）
   if (!token) return <LoginPage onLogin={handleLogin} />
 
-  // ── 发送问题（核心函数）──────────────────────────────
-  // 流程：
-  //   1. 把用户消息加入 messages（立即显示在页面上）
-  //   2. 发 POST /ask 请求，带上 token + 历史对话
-  //   3. 收到响应后，把 AI 回复加入 messages
-  //   4. 更新 contextSummary 和 history，供下次对话使用
+  // ── 发送问题（SSE流式版）★核心改动 ──────────────────────
+  //
+  // 【和旧版 /ask 的区别】
+  // 旧版：fetch POST /ask → 等待全部完成 → 一次性拿到结果
+  //   缺点：用户等待 5-10 秒，页面没有任何反馈
+  //
+  // 新版：fetch POST /ask/stream → 读取 ReadableStream
+  //   后端每完成一步推送一个 SSE 事件（"data: {...}\n\n"）
+  //   前端实时解析并更新 streamSteps，用户能看到每步进度
+  //   最后收到 type="result" 事件，渲染完整结果
+  //
+  // 【为什么不用 EventSource？】
+  // EventSource 只支持 GET 请求，无法发送 POST body（question/history）
+  // 所以用 fetch + ReadableStream 手动读取 SSE 流
+  //
+  // 【SSE 事件格式】
+  // 后端推送的每个事件是一行文本：
+  //   data: {"type":"step","label":"识别数据源","detail":"线上库","status":"done"}\n\n
+  //   data: {"type":"result","data":{...},"status":"done"}\n\n
   const sendQuestion = async () => {
     if (!input.trim() || loading) return
     const question = input.trim()
     setInput('')
     setLoading(true)
-    setLoadingText('理解问题中...')
+    setStreamSteps([])  // 清空上一次的进度步骤
+
     // 立即把用户消息显示出来，不等后端响应
     setMessages(prev => [...prev, { role: 'user', content: question }])
 
-    // 模拟进度文字（后端处理需要几秒，给用户一些反馈）
-    const t1 = setTimeout(() => setLoadingText('查询数据中...'), 2000)
-    const t2 = setTimeout(() => setLoadingText('生成分析结论...'), 5000)
-
     try {
-      const res = await fetch(`${API}/ask`, {
+      // 发起 SSE 请求（POST + ReadableStream）
+      const res = await fetch(`${API}/ask/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`, // 每次请求都带上 token
+          'Authorization': `Bearer ${token}`,
         },
-        // history: 最近几轮对话，让 AI 理解上下文（支持追问）
-        // context_summary: 上一轮的分析摘要，比完整 history 更省 token
         body: JSON.stringify({ question, history, context_summary: contextSummary }),
       })
 
       // 后端返回 401 说明 token 过期，自动退出登录
       if (res.status === 401) { handleLogout(); return }
 
-      const data = await res.json()
-      clearTimeout(t1); clearTimeout(t2)
+      // 获取可读流，用于逐块读取 SSE 数据
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''  // 缓冲区，处理跨块的不完整事件
 
-      // 把后端返回的所有字段存入 messages，AssistantBubble 组件负责渲染
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        mode: data.mode,                    // "simple" 或 "analysis"
-        analysis_type: data.analysis_type,  // "anomaly"/"trend"/"comparison"/"distribution"
-        steps: data.steps,                  // 分析型查询的子步骤
-        conclusion: data.conclusion,        // AI 生成的结论文字
-        data: data.data,                    // SQL 查询结果，SmartChart 用来画图
-        sql: data.sql,                      // 生成的 SQL（简单查询时有）
-        error: data.error,                  // 错误信息（如果有）
-        intent: data.intent,                // 意图识别结果
-        context_summary: data.context_summary, // 本轮摘要
-        rag_sources: data.rag_sources,      // RAG 溯源标签
-        source_ids: data.source_ids,        // 用了哪些数据源
-      }])
+      // 持续读取流，直到后端关闭连接
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
 
-      if (data.context_summary) setContextSummary(data.context_summary)
+        // 把二进制数据解码成字符串，追加到缓冲区
+        buffer += decoder.decode(value, { stream: true })
 
-      const assistantContent = data.conclusion || data.error || '无结果'
-      setHistory(prev => [
-        ...prev,
-        { role: 'user', content: question },
-        { role: 'assistant', content: assistantContent },
-      ])
+        // SSE 每个事件以 \n\n 结尾，按此分割
+        const parts = buffer.split('\n\n')
+        // 最后一段可能不完整，留在缓冲区等下一块
+        buffer = parts.pop()
+
+        for (const part of parts) {
+          // SSE 格式："data: {...}"，去掉 "data: " 前缀
+          const line = part.trim()
+          if (!line.startsWith('data:')) continue
+          const jsonStr = line.slice(5).trim()
+          let event
+          try { event = JSON.parse(jsonStr) } catch { continue }
+
+          if (event.type === 'step') {
+            // 每收到一个 step 事件，更新进度列表
+            // 用 label 作为 key，同一步骤的 running→done 状态更新
+            setStreamSteps(prev => {
+              const idx = prev.findIndex(s => s.label === event.label)
+              if (idx >= 0) {
+                // 已存在这个步骤，更新状态
+                const next = [...prev]
+                next[idx] = event
+                return next
+              }
+              return [...prev, event]  // 新步骤，追加
+            })
+            // 同步更新 loadingText，显示当前在干什么
+            setLoadingText(event.label + (event.detail ? `：${event.detail.slice(0, 30)}` : ''))
+
+          } else if (event.type === 'result') {
+            // 收到最终结果，渲染完整回复
+            const data = event.data
+            setMessages(prev => [...prev, {
+              role: 'assistant',
+              mode: data.mode,
+              analysis_type: data.analysis_type,
+              steps: data.steps,
+              conclusion: data.conclusion,
+              data: data.data,
+              sql: data.sql,
+              error: data.error,
+              intent: data.intent,
+              context_summary: data.context_summary,
+              rag_sources: data.rag_sources,
+              source_ids: data.source_ids,
+            }])
+            if (data.context_summary) setContextSummary(data.context_summary)
+            const assistantContent = data.conclusion || data.error || '无结果'
+            setHistory(prev => [
+              ...prev,
+              { role: 'user', content: question },
+              { role: 'assistant', content: assistantContent },
+            ])
+
+          } else if (event.type === 'error') {
+            // 后端推送了错误事件
+            setMessages(prev => [...prev, { role: 'assistant', error: event.detail || '执行出错' }])
+          }
+        }
+      }
     } catch {
-      clearTimeout(t1); clearTimeout(t2)
       setMessages(prev => [...prev, { role: 'assistant', error: '请求失败，请检查后端是否启动' }])
     }
+
     setLoading(false)
+    setStreamSteps([])  // 清空进度步骤，避免下次提问时残留
   }
 
   const handleKeyDown = (e) => {
@@ -588,7 +714,7 @@ export default function App() {
       </header>
 
       <div className="chat-area">
-        {messages.length === 0 && (
+        {messages.length === 0 && !loading && (
           <div className="empty-hint">
             <p className="hint-title">试着问我：</p>
             <div className="hint-chips">
@@ -609,7 +735,19 @@ export default function App() {
           </div>
         ))}
 
-        {loading && <LoadingBubble loadingText={loadingText} />}
+        {/* 加载中：先显示实时进度步骤，再显示 loading 气泡 */}
+        {loading && (
+          <div className="message assistant">
+            <div className="bubble assistant-bubble">
+              {streamSteps.length > 0 && <StreamSteps steps={streamSteps} />}
+              <div className="loading-inline">
+                <span className="loading-dot" />
+                {loadingText}
+              </div>
+            </div>
+          </div>
+        )}
+
         <div ref={bottomRef} />
       </div>
 
